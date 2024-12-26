@@ -21,7 +21,7 @@ __plugin_meta__ = PluginMetadata(
         "插件会定期自动推送群聊讨论总结，推送时间可配置。"
     ),
     type="application",
-    homepage="",
+    homepage="https://github.com/hakunomiko/nonebot-plugin-whats-talk-gemini",
     config=Config,
     supported_adapters={"~onebot.v11"},
 )
