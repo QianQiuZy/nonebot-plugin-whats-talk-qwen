@@ -1,4 +1,4 @@
-from typing import List  # noqa: UP035
+from typing import List
 
 from pydantic import BaseModel, Extra
 
