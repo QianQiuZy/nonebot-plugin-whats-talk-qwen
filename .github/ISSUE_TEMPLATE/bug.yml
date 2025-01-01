@@ -76,7 +76,7 @@ body:
       description: 你当前使用的Python版本？
       options:
         - Python3.11以上
-        - Python3.9~3.12之间
+        - Python3.9~3.11之间
         - Python3.9以下
     validations:
       required: true
