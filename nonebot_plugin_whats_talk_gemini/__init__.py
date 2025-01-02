@@ -97,6 +97,7 @@ async def get_history_chat(bot: Bot, group_id: int):
             group_id=group_id,
             count=wt_history_lens,
         )
+        logger.debug(history)
         for message in history["messages"]:
             sender = message["sender"]["card"] or message["sender"]["nickname"]
             text_messages = [msg["data"]["text"] for msg in message["message"] if msg["type"] == "text"]
@@ -104,6 +105,7 @@ async def get_history_chat(bot: Bot, group_id: int):
     except Exception as e:
         logger.error(f"获取聊天记录失败: {e!s}")
         raise Exception(f"获取聊天记录失败,错误信息: {e!s}")
+    logger.debug(messages)
     return messages
 
 
