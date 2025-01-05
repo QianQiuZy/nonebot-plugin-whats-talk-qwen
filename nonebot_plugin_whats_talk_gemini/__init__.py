@@ -3,6 +3,7 @@ import asyncio
 import httpx
 from nonebot import get_bots, get_plugin_config, on_command, require
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
+from nonebot.exception import FinishedException
 from nonebot.log import logger
 from nonebot.plugin import PluginMetadata
 from nonebot.rule import is_type
@@ -74,6 +75,8 @@ async def handle_whats_talk(bot: Bot, event: GroupMessageEvent):
                 }
             ],
         )
+    except FinishedException:
+        raise
     except Exception as e:
         logger.error(f"命令执行过程中发生错误: {e!s}")
         await whats_talk.finish(f"命令执行过程中发生错误，错误信息: {e!s}")
@@ -100,7 +103,11 @@ async def get_history_chat(bot: Bot, group_id: int):
         logger.debug(history)
         for message in history["messages"]:
             sender = message["sender"]["card"] or message["sender"]["nickname"]
-            text_messages = [msg["data"]["text"] for msg in message["message"] if msg["type"] == "text"]
+            text_messages = []
+            if isinstance(message["message"], list):
+                text_messages = [msg["data"]["text"] for msg in message["message"] if msg["type"] == "text"]
+            elif isinstance(message["message"], str) and "CQ:" not in message["message"]:
+                text_messages = [message["message"]]
             messages.extend([f"{sender}: {text}" for text in text_messages])
     except Exception as e:
         logger.error(f"获取聊天记录失败: {e!s}")
