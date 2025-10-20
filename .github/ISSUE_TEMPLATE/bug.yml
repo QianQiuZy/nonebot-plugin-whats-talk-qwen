@@ -7,12 +7,12 @@ body:
     attributes:
       value: |
         感谢对项目的支持与关注。在提出问题之前，请确保你已查看相关开发或使用文档：
-        - https://github.com/hakunomiko/nonebot-plugin-whats-talk-gemini?tab=readme-ov-file#%EF%B8%8F-%E9%85%8D%E7%BD%AE
+        - https://github.com/qianqiuzy/nonebot-plugin-whats-talk-qwen?tab=readme-ov-file#%EF%B8%8F-%E9%85%8D%E7%BD%AE
   - type: checkboxes
     attributes:
       label: 这个问题是否已经存在？
       options:
-        - label: 我已经搜索过现有的问题 (https://github.com/hakunomiko/nonebot-plugin-whats-talk-gemini/issues)
+        - label: 我已经搜索过现有的问题 (https://github.com/qianqiuzy/nonebot-plugin-whats-talk-qwen/issues)
           required: true
   - type: textarea
     attributes:
@@ -43,10 +43,10 @@ body:
       value: |
         [在这里上传图片]
   - type: input
-    id: nonebot_plugin_whats_talk_gemini_version
+    id: nonebot_plugin_whats_talk_qwen_version
     attributes:
       label: 插件版本号
-      description: 当前你使用的 hakunomiko/nonebot-plugin-whats-talk-gemini 版本号
+      description: 当前你使用的 hakunomiko/nonebot-plugin-whats-talk-qwen 版本号
     validations:
       required: true
   - type: dropdown
