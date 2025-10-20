@@ -1,10 +1,10 @@
 [tool.poetry]
-name = "nonebot-plugin-whats-talk-gemini"
-version = "0.0.5"
+name = "nonebot-plugin-whats-talk-qwen"
+version = "0.0.1"
 description = "分析群聊记录，生成近期讨论话题的总结。"
-authors = ["hakunomiko <48401273+hakunomiko@users.noreply.github.com>"]
+authors = ["qianqiuzy <qianqiuzy@gmail.com>"]
 readme = "README.md"
-repository = "https://github.com/hakunomiko/nonebot-plugin-whats-talk-gemini"
+repository = "https://github.com/qianqiuzy/nonebot-plugin-whats-talk-qwen"
 keywords = ["nonebot", "nonebot2", "plugin"]
 
 [tool.poetry.dependencies]
