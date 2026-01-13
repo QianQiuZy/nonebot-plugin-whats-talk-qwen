@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import httpx
 from nonebot import get_bots, get_plugin_config, on_command, require
@@ -49,6 +50,11 @@ wt_proxy = plugin_config.wt_proxy       # 不再使用
 wt_history_lens = plugin_config.wt_history_lens
 wt_push_cron = plugin_config.wt_push_cron
 wt_group_list = plugin_config.wt_group_list
+
+# ==================== 群级触发冷却 ====================
+GROUP_COOLDOWN_SECONDS = 10 * 60
+group_cd_until: dict[int, float] = {}
+# =====================================================
 
 # 注册事件响应器
 whats_talk = on_command(
@@ -145,6 +151,11 @@ async def send_group_forward_safely(bot: Bot, group_id: int, title: str, text: s
 @whats_talk.handle()
 async def handle_whats_talk(bot: Bot, event: GroupMessageEvent):
     group_id = event.group_id
+    now = time.monotonic()
+    cd_until = group_cd_until.get(group_id, 0.0)
+    if now < cd_until:
+        await whats_talk.finish("正在CD中")
+    group_cd_until[group_id] = now + GROUP_COOLDOWN_SECONDS
     try:
         messages = await get_history_chat(bot, group_id)
         member_count = await get_group_member(bot, group_id)
