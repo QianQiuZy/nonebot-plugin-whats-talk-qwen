@@ -53,7 +53,8 @@ wt_group_list = plugin_config.wt_group_list
 
 # ==================== 群级触发冷却 ====================
 GROUP_COOLDOWN_SECONDS = 10 * 60
-group_cd_until: dict[int, float] = {}
+group_last_summary: dict[int, tuple[str, float]] = {}
+group_summary_inflight: dict[int, bool] = {}
 # =====================================================
 
 # 注册事件响应器
@@ -152,10 +153,14 @@ async def send_group_forward_safely(bot: Bot, group_id: int, title: str, text: s
 async def handle_whats_talk(bot: Bot, event: GroupMessageEvent):
     group_id = event.group_id
     now = time.monotonic()
-    cd_until = group_cd_until.get(group_id, 0.0)
-    if now < cd_until:
-        await whats_talk.finish("正在CD中")
-    group_cd_until[group_id] = now + GROUP_COOLDOWN_SECONDS
+    if group_summary_inflight.get(group_id):
+        await whats_talk.finish("等待总结中，请稍后")
+    last_summary = group_last_summary.get(group_id)
+    if last_summary and now - last_summary[1] < GROUP_COOLDOWN_SECONDS:
+        await send_text_safely(bot, group_id, "10分钟内有人总结过哦，给你再看一遍吧")
+        await send_group_forward_safely(bot, group_id, "群聊总结", last_summary[0])
+        await whats_talk.finish()
+    group_summary_inflight[group_id] = True
     try:
         messages = await get_history_chat(bot, group_id)
         member_count = await get_group_member(bot, group_id)
@@ -166,6 +171,7 @@ async def handle_whats_talk(bot: Bot, event: GroupMessageEvent):
         if not summary:
             await whats_talk.finish("生成聊天总结失败，请稍后再试。")
 
+        group_last_summary[group_id] = (summary, time.monotonic())
         # NEW: 统一走安全合并转发发送（内部已带重试与降级）
         await send_group_forward_safely(bot, group_id, "群聊总结", summary)
 
@@ -174,6 +180,8 @@ async def handle_whats_talk(bot: Bot, event: GroupMessageEvent):
     except Exception as e:
         logger.error(f"命令执行过程中发生错误: {e!s}")
         await whats_talk.finish(f"命令执行过程中发生错误，错误信息: {e!s}")
+    finally:
+        group_summary_inflight[group_id] = False
 
 # 获取群成员数量
 async def get_group_member(bot: Bot, group_id: int) -> int:
@@ -369,6 +377,10 @@ async def push_whats_talk():
         if isinstance(bot, Bot):
             for group_id in wt_group_list:
                 try:
+                    if group_summary_inflight.get(group_id):
+                        logger.info(f"群 {group_id} 已有总结任务在进行，跳过本次定时推送。")
+                        continue
+                    group_summary_inflight[group_id] = True
                     messages = await get_history_chat(bot, group_id)
                     member_count = await get_group_member(bot, group_id)
                     if not messages:
@@ -380,6 +392,7 @@ async def push_whats_talk():
                         await send_text_safely(bot, group_id, "生成聊天总结失败，请稍后再试。")
                         continue
 
+                    group_last_summary[group_id] = (summary, time.monotonic())
                     # NEW: 统一走安全合并转发发送（内部已带重试与降级）
                     await send_group_forward_safely(bot, group_id, "群聊总结", summary)
 
@@ -391,4 +404,6 @@ async def push_whats_talk():
                         )
                     except Exception as e2:
                         logger.error(f"向群 {group_id} 发送错误提示也失败: {e2!s}")
+                finally:
+                    group_summary_inflight[group_id] = False
                 await asyncio.sleep(2)
