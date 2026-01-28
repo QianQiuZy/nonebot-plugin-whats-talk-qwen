@@ -1,5 +1,6 @@
 import asyncio
 import time
+import re
 
 import httpx
 from nonebot import get_bots, get_plugin_config, on_command, require
@@ -20,10 +21,16 @@ from nonebot_plugin_apscheduler import scheduler
 
 from .config import Config
 
+_FATAL_FORWARD_PAT = re.compile(
+    r"(SsoSendLongMsg|long_msg_interface|sendCommand timed out)",
+    re.IGNORECASE,
+)
+
 # ==================== 发送稳健化参数（可按需调整） ====================
 MAX_NODES = 30               # 合并转发的最大节点数（过高更易失败/超时）
 MAX_CHARS_PER_NODE = 600     # 单节点最大字符数（过长更易失败/超时）
 RETRY_DELAYS = (0, 1, 3, 7)  # 指数回退重试(秒)，最后一次后降级为普通文本
+MAX_FORWARD_TOTAL_CHARS = 12000
 # =====================================================================
 
 # 插件元数据
@@ -52,7 +59,7 @@ wt_push_cron = plugin_config.wt_push_cron
 wt_group_list = plugin_config.wt_group_list
 
 # ==================== 群级触发冷却 ====================
-GROUP_COOLDOWN_SECONDS = 10 * 60
+GROUP_COOLDOWN_SECONDS = 15 * 60
 group_last_summary: dict[int, tuple[str, float]] = {}
 group_summary_inflight: dict[int, bool] = {}
 # =====================================================
@@ -68,21 +75,40 @@ whats_talk = on_command(
 
 # ==================== NEW: 文本切片与安全发送工具 ====================
 def _split_text(text: str, limit: int) -> list[str]:
-    """按行切片，尽量在换行处分割，避免打断编码/富文本。
-    """
-    parts, buf = [], ""
-    for line in text.splitlines():
-        line = line.rstrip("\r")
-        # +1 预留换行
-        if len(buf) + len(line) + (1 if buf else 0) > limit:
-            if buf:
-                parts.append(buf)
+    """按行优先切片；遇到单行超长时硬切，确保每段长度 <= limit。"""
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not text:
+        return [""]
+
+    parts: list[str] = []
+    buf = ""
+
+    def flush():
+        nonlocal buf
+        if buf:
+            parts.append(buf)
+            buf = ""
+
+    for line in text.split("\n"):
+        # 单行超长：先把已有缓冲刷掉，再硬切该行
+        if len(line) > limit:
+            flush()
+            s = line
+            while s:
+                parts.append(s[:limit])
+                s = s[limit:]
+            continue
+
+        # 正常按行拼接（+1 预留换行）
+        add_len = len(line) + (1 if buf else 0)
+        if len(buf) + add_len > limit:
+            flush()
             buf = line
         else:
             buf = f"{buf}\n{line}" if buf else line
-    if buf:
-        parts.append(buf)
-    return parts
+
+    flush()
+    return parts or [""]
 
 
 def _build_forward_nodes(bot: Bot, title: str, text: str) -> tuple[list[MessageSegment], list[str]]:
@@ -125,8 +151,30 @@ async def send_text_safely(bot: Bot, group_id: int, text: str) -> None:
 
 
 async def send_group_forward_safely(bot: Bot, group_id: int, title: str, text: str) -> None:
-    """合并转发安全发送：节点化 + 指数退避重试；失败则降级为多段普通文本。"""
-    nodes, chunks = _build_forward_nodes(bot, title, text)
+    """合并转发安全发送：节点化 + 重试；遇到 long_msg 超时类错误直接降级。"""
+
+    # 先切片（此时已保证每块 <= MAX_CHARS_PER_NODE）
+    chunks = _split_text(text, MAX_CHARS_PER_NODE)
+
+    # 内容过长/节点过多：直接跳过合并转发，避免 NapCat 进入长消息链路
+    if len(text) > MAX_FORWARD_TOTAL_CHARS or len(chunks) > MAX_NODES:
+        logger.warning(
+            f"跳过合并转发：len(text)={len(text)} len(chunks)={len(chunks)} "
+            f"(阈值 total={MAX_FORWARD_TOTAL_CHARS}, nodes={MAX_NODES})，改用普通消息分段发送"
+        )
+        await send_text_safely(bot, group_id, title)
+        for c in chunks:
+            await send_text_safely(bot, group_id, c)
+        return
+
+    nodes = [
+        MessageSegment.node_custom(
+            user_id=int(bot.self_id),
+            nickname=title,
+            content=Message(chunk),
+        )
+        for chunk in chunks
+    ]
 
     last_err = None
     for i, delay in enumerate(RETRY_DELAYS):
@@ -137,15 +185,26 @@ async def send_group_forward_safely(bot: Bot, group_id: int, title: str, text: s
             return
         except ActionFailed as e:
             last_err = e
+            err_text = str(e)
+
+            # ✅ 关键：命中 long_msg/超时类错误，直接降级，不再重试同 payload
+            if _FATAL_FORWARD_PAT.search(err_text):
+                logger.error(f"合并转发触发 long_msg 超时，直接降级：{err_text}")
+                await send_text_safely(bot, group_id, title)
+                for c in chunks:
+                    await send_text_safely(bot, group_id, c)
+                return
+
             logger.warning(
-                f"send_group_forward_msg失败(尝试{i+1}/{len(RETRY_DELAYS)}): {e!s}；"
+                f"send_group_forward_msg失败(尝试{i+1}/{len(RETRY_DELAYS)}): {err_text}；"
                 f"将于 {RETRY_DELAYS[i+1] if i+1 < len(RETRY_DELAYS) else '降级'} 后处理"
             )
 
     # 最终失败：降级为多段普通文本
     logger.error(f"send_group_forward_msg最终失败，降级为多段文本发送：{last_err!s}")
+    await send_text_safely(bot, group_id, title)
     for c in chunks:
-        await send_text_safely(bot, group_id, f"{title}\n{c}")
+        await send_text_safely(bot, group_id, c)
 # =====================================================================
 
 # 处理命令
@@ -157,7 +216,7 @@ async def handle_whats_talk(bot: Bot, event: GroupMessageEvent):
         await whats_talk.finish("等待总结中，请稍后")
     last_summary = group_last_summary.get(group_id)
     if last_summary and now - last_summary[1] < GROUP_COOLDOWN_SECONDS:
-        await send_text_safely(bot, group_id, "10分钟内有人总结过哦，给你再看一遍吧")
+        await send_text_safely(bot, group_id, "15分钟内有人总结过哦，给你再看一遍吧")
         await send_group_forward_safely(bot, group_id, "群聊总结", last_summary[0])
         await whats_talk.finish()
     group_summary_inflight[group_id] = True
@@ -167,7 +226,7 @@ async def handle_whats_talk(bot: Bot, event: GroupMessageEvent):
         if not messages:
             await whats_talk.finish("未能获取到聊天记录。")
 
-        summary = await chat_with_qwen(messages, member_count)
+        summary = await chat_with_gemini(messages, member_count)
         if not summary:
             await whats_talk.finish("生成聊天总结失败，请稍后再试。")
 
@@ -219,7 +278,20 @@ async def get_history_chat(bot: Bot, group_id: int):
     logger.debug(messages)
     return messages
 
-async def chat_with_qwen(messages, member_count):
+def _extract_gemini_text(data: dict) -> str:
+    candidates = data.get("candidates") or []
+    if not candidates:
+        return ""
+    content = (candidates[0].get("content") or {})
+    parts = content.get("parts") or []
+    texts = []
+    for p in parts:
+        t = p.get("text")
+        if t:
+            texts.append(t)
+    return "".join(texts).strip()
+
+async def chat_with_gemini(messages, member_count):
     # —— 提示词保持不变 —— 
     prompt = (
         "# Role: 群友聊天总结专家\n"
@@ -302,58 +374,61 @@ async def chat_with_qwen(messages, member_count):
         "- 突出特点为：快速高效的问题解答，讨论集中但缺乏深入拓展。\n"
     )
 
-    sys_msg = {"role": "system", "content": prompt}
-    user_msg = {"role": "user", "content": "\n".join(messages)}
+    model = (wt_model_name or "gemini-3-pro-preview").strip() or "gemini-3-pro-preview"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
-    url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-
+    user_text = "\n".join(messages)
     payload = {
-        "model": (wt_model_name or "qwen3-max"),
-        "messages": [sys_msg, user_msg],
-        # 可选：温度/输出上限等
-        # "temperature": 0.3,
-        # "max_tokens": 2048,
-        # Qwen3 商业版默认不启用“思考过程”，无需额外参数
+        "systemInstruction": {
+            "parts": [{"text": prompt}],
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": user_text}],
+            }
+        ],
+        # 可选：生成参数（按需开启）
+        # "generationConfig": {
+        #     "temperature": 0.3,
+        #     "maxOutputTokens": 2048,
+        # },
     }
-
-    # 轮询多把 Key，遇到 429/配额等继续下一把
     for wt_api_key in wt_api_keys:
         headers = {
-            "Authorization": f"Bearer {wt_api_key}",
+            "x-goog-api-key": wt_api_key,
             "Content-Type": "application/json",
         }
         try:
-            async with httpx.AsyncClient(timeout=300) as client:  # 不使用代理
+            proxy = (wt_proxy or "").strip() or None
+            async with httpx.AsyncClient(timeout=300, proxy=proxy, trust_env=False) as client:
                 resp = await client.post(url, headers=headers, json=payload)
 
-            if resp.status_code == 429:
-                logger.warning(f"API Key 限流/配额耗尽：{resp.text[:200]}，切至下一把。")
+            # 常见：限流/配额/鉴权失败 -> 换下一把 key
+            if resp.status_code in (401, 403, 429):
+                logger.warning(f"Gemini Key 可能无效/受限(code={resp.status_code})：{resp.text[:200]}，切至下一把。")
                 continue
 
             resp.raise_for_status()
             data = resp.json()
-            choice = (data.get("choices") or [{}])[0]
-            content = (choice.get("message") or {}).get("content") or ""
-            content = content.strip()
+            content = _extract_gemini_text(data)
             if content:
                 return content
 
-            # 没取到内容：可能是 finish_reason/工具调用等情况
-            raise Exception(f"Qwen 返回为空或结构异常：{data!r}")
+            raise Exception(f"Gemini 返回为空或结构异常：{data!r}")
 
         except httpx.HTTPStatusError as e:
             code = e.response.status_code
             body = (e.response.text or "")[:200]
             if code in (401, 403, 429, 500, 502, 503, 504):
-                logger.warning(f"Qwen 调用失败(code={code})，切至下一把：{body}")
+                logger.warning(f"Gemini 调用失败(code={code})，切至下一把：{body}")
                 continue
-            logger.error(f"调用 Qwen 接口失败: {code} {body}")
-            raise Exception(f"调用 Qwen 接口失败，错误信息: {code} {body}")
+            logger.error(f"调用 Gemini 接口失败: {code} {body}")
+            raise Exception(f"调用 Gemini 接口失败，错误信息: {code} {body}")
         except Exception as e:
-            logger.error(f"发生预料之外的错误: {e!s}")
-            raise Exception(f"发生预料之外的错误，错误信息: {e!s}")
-
-    raise Exception("所有 API Key 均超出限制或调用失败。")
+             logger.error(f"发生预料之外的错误: {e!s}")
+             raise Exception(f"发生预料之外的错误，错误信息: {e!s}")
+    raise Exception("所有 Gemini API Key 均超出限制或调用失败。")
 
 # 解析 cron 表达式
 def parse_cron_expression(cron: str):
@@ -387,7 +462,7 @@ async def push_whats_talk():
                         await send_text_safely(bot, group_id, "未能获取到聊天记录。")
                         continue
 
-                    summary = await chat_with_qwen(messages, member_count)
+                    summary = await chat_with_gemini(messages, member_count)
                     if not summary:
                         await send_text_safely(bot, group_id, "生成聊天总结失败，请稍后再试。")
                         continue
